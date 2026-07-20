@@ -1,0 +1,68 @@
+name: update-lists
+
+# Refresh the provider IP lists. These ranges change slowly, so 6-hourly is
+# plenty. Also runnable on demand.
+on:
+  workflow_dispatch:
+  schedule:
+    # Scheduled workflows only run on the default branch.
+    - cron: '0 */6 * * *'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-lists
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      # GitHub auto-disables scheduled workflows after 60 days of repo
+      # inactivity. This no-op re-enable keeps the schedule alive through quiet
+      # periods. It must never fail the run.
+      - name: Keep schedule alive
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh api -X PUT \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/update.yml/enable" \
+            || echo "keep-alive call failed (non-fatal)"
+
+      # Run every generator. run_all writes each provider's list plus
+      # all-safe.txt, still committing successful providers if one fails, and
+      # exits non-zero so a partial failure is visibly red. We capture that
+      # exit code but do NOT let it abort the commit step.
+      - name: Generate lists
+        id: generate
+        run: |
+          set +e
+          python3 generators/run_all.py
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Run unit tests
+        run: python3 tests/test_transforms.py
+
+      - name: Commit updated lists
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'chore: refresh provider IP lists'
+          file_pattern: 'lists/*.txt'
+
+      # Make the run red if any generator failed, AFTER committing the ones
+      # that succeeded.
+      - name: Fail run if any generator failed
+        if: steps.generate.outputs.exit_code != '0'
+        run: |
+          echo "One or more generators failed (exit ${{ steps.generate.outputs.exit_code }})."
+          exit 1

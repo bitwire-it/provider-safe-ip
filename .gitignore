@@ -1,0 +1,4 @@
+.tokensave
+__pycache__/
+*.pyc
+lists/*.txt.tmp
