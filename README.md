@@ -87,9 +87,31 @@ always produces byte-identical output, so `git` diffs are meaningful.
 
 ### Not included
 
-- **Slack** — Slack does not publish an official machine-readable IP range feed
-  for its own services (they run on cloud infra and explicitly decline to
-  publish static ranges). Skipped rather than scraping unofficial gists.
+These providers were evaluated but have **no official public machine-readable
+IP feed**, so they are deliberately skipped rather than scraping HTML support
+pages or ingesting third-party gists (both against this project's rules). Where
+a provider is reachable another way, the recommended alternative is noted.
+
+- **Slack** — no official machine-readable IP feed for its own services (runs on
+  cloud infra, explicitly declines to publish static ranges). Allowlist by
+  domain if needed.
+- **CrowdStrike** — the canonical Falcon cloud IP list is published only *behind
+  the Falcon portal login* (`falcon.<region>.crowdstrike.com/documentation/…/
+  cloud-ip-addresses`). The only machine-readable copies are third-party
+  community gists, which this project will not ingest. Pull the list from your
+  authenticated Falcon console, or allowlist by FQDN.
+- **SentinelOne** — no published static IP list. Allowlisting is **domain/FQDN
+  based** (`*.sentinelone.net`, region/tenant specific) over multi-cloud + CDN
+  with dynamic IPs. Allowlist by domain.
+- **Blackpoint Cyber** — no public IP/firewall documentation; connectivity
+  requirements are provided only during onboarding/support. Nothing to ingest.
+- **Huntress** — agent-to-cloud communication has **no static IPs** (runs on
+  AWS/Azure/Cloudflare, dynamic); Huntress documents allowlisting by domain
+  (`agent.huntress.io`, `eetee.huntress.io`, `update.huntress.io`,
+  `eetee.huntresscdn.com`, plus `*.bugsnag.com`). The only static ranges are two
+  `/28`s used for Huntress → *your* PSA/SIEM outbound, published solely in a
+  bot-blocked support article that is actively changing during their AWS→Azure
+  migration — not a stable machine-readable feed — so they are not tracked here.
 
 ## Layout
 
