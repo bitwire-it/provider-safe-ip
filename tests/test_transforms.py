@@ -13,13 +13,26 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "generators"))
 
 import _common as common  # noqa: E402
+import anthropic  # noqa: E402
 import apple  # noqa: E402
+import atlassian  # noqa: E402
 import aws  # noqa: E402
+import bingbot  # noqa: E402
+import bunny  # noqa: E402
 import cloudflare  # noqa: E402
+import datadog  # noqa: E402
+import duckduckgo  # noqa: E402
 import fastly  # noqa: E402
 import github  # noqa: E402
 import google  # noqa: E402
+import google_crawlers  # noqa: E402
+import meta  # noqa: E402
 import microsoft365  # noqa: E402
+import okta  # noqa: E402
+import openai  # noqa: E402
+import perplexity  # noqa: E402
+import stripe  # noqa: E402
+import telegram  # noqa: E402
 import zoom  # noqa: E402
 import zscaler  # noqa: E402
 
@@ -289,6 +302,228 @@ def test_zscaler_walks_nested_ranges_and_svpn():
     # coordinates and hostnames must NOT be parsed as networks
     assert not any(s.startswith("52.") for s in got)
     assert zscaler.SAFE is False
+
+
+# --------------------------------------------------------------------------
+# _common.extract_prefix_entries (shared ipranges shape)
+# --------------------------------------------------------------------------
+
+def test_extract_prefix_entries_shape():
+    payload = {"creationTime": "2026-01-01T00:00:00", "prefixes": [
+        {"ipv4Prefix": "1.2.3.0/24"},
+        {"ipv6Prefix": "2001:db8::/32"},
+        {"ipv4Prefix": "4.4.4.0/24", "ipv6Prefix": "2001:db8:1::/48"},  # v4 wins
+        {"note": "no prefix key"},
+        None,
+    ]}
+    assert common.extract_prefix_entries(payload) == [
+        "1.2.3.0/24", "2001:db8::/32", "4.4.4.0/24",
+    ]
+    assert common.extract_prefix_entries({}) == []
+
+
+# --------------------------------------------------------------------------
+# meta  (RADB whois, RPKI-validated objects only)
+# --------------------------------------------------------------------------
+
+RADB_SAMPLE = """route:          31.13.24.0/21
+descr:          Facebook, Inc.
+origin:         AS32934
+mnt-by:         MAINT-AS32934
+source:         RADB
+last-modified:  2023-11-13T15:41:43Z
+
+route:          31.13.24.0/21
+descr:          RPKI ROA for 31.13.24.0/21 / AS32934
+remarks:        This AS32934 route object represents routing data retrieved
+                from the RPKI. source: NOT-A-REAL-ATTRIBUTE on a continuation line
+max-length:     24
+origin:         AS32934
+source:         RPKI  # Trust Anchor: ripe
+
+route6:         2a03:2880::/32
+origin:         AS32934
+source:         RPKI  # Trust Anchor: arin
+
+route:          203.0.113.0/24
+descr:          hijack-shaped object anybody can register in RADB
+origin:         AS32934
+source:         RADB
+"""
+
+
+def test_meta_parses_rpsl_objects():
+    got = meta.parse_route_objects(RADB_SAMPLE)
+    assert got == [
+        ("31.13.24.0/21", "RADB"),
+        ("31.13.24.0/21", "RPKI"),
+        ("2a03:2880::/32", "RPKI"),
+        ("203.0.113.0/24", "RADB"),
+    ]
+
+
+def test_meta_keeps_only_rpki_validated_prefixes():
+    got = {str(n) for n in meta.transform(RADB_SAMPLE, minimum=0)}
+    # RPKI-derived objects are kept ...
+    assert got == {"31.13.24.0/21", "2a03:2880::/32"}
+    # ... and an unvalidated RADB object -- which anyone can register under
+    # someone else's origin AS -- can never whitelist itself into the feed.
+    assert "203.0.113.0/24" not in got
+
+
+def test_meta_refuses_truncated_whois_response():
+    try:
+        meta.transform(RADB_SAMPLE, minimum=100)
+    except RuntimeError as err:
+        assert "refusing a truncated feed" in str(err)
+    else:
+        raise AssertionError("expected RuntimeError on a short whois response")
+
+
+# --------------------------------------------------------------------------
+# telegram
+# --------------------------------------------------------------------------
+
+def test_telegram_parses_cidr_txt():
+    text = "# telegram\n91.108.4.0/22\n\n  149.154.160.0/20 \n2001:b28:f23d::/48\n"
+    got = {str(n) for n in telegram.transform(text)}
+    assert got == {"91.108.4.0/22", "149.154.160.0/20", "2001:b28:f23d::/48"}
+    assert telegram.SAFE is True
+
+
+# --------------------------------------------------------------------------
+# crawlers vs user-triggered fetchers
+# --------------------------------------------------------------------------
+
+def ipranges(*prefixes):
+    return {"prefixes": [{"ipv4Prefix": p} if "." in p else {"ipv6Prefix": p}
+                         for p in prefixes]}
+
+
+def test_openai_splits_crawlers_from_user_fetchers():
+    products = openai.transform(
+        ipranges("20.171.206.0/24"),      # GPTBot
+        ipranges("135.234.64.0/24"),      # OAI-SearchBot
+        ipranges("104.210.139.192/28"),   # ChatGPT-User
+    )
+    crawlers = {str(n) for n in products[openai.CRAWLER_NAME]}
+    users = {str(n) for n in products[openai.USER_NAME]}
+    assert crawlers == {"20.171.206.0/24", "135.234.64.0/24"}
+    assert users == {"104.210.139.192/28"}
+    # user-triggered fetches must never leak into the crawler (safe) product
+    assert "104.210.139.192/28" not in crawlers
+
+
+def test_openai_build_marks_safety_flags():
+    saved = openai.fetch
+    openai.fetch = lambda: (ipranges("20.171.206.0/24"),
+                            ipranges("135.234.64.0/24"),
+                            ipranges("104.210.139.192/28"))
+    try:
+        flags = {name: safe for name, safe, _ in openai.build()}
+    finally:
+        openai.fetch = saved
+    assert flags[openai.CRAWLER_NAME] is True
+    assert flags[openai.USER_NAME] is False
+
+
+def test_perplexity_splits_and_flags():
+    products = perplexity.transform(ipranges("3.224.62.45/32"),
+                                    ipranges("18.97.21.0/30"))
+    assert {str(n) for n in products[perplexity.CRAWLER_NAME]} == {"3.224.62.45/32"}
+    assert {str(n) for n in products[perplexity.USER_NAME]} == {"18.97.21.0/30"}
+
+    saved = perplexity.fetch
+    perplexity.fetch = lambda: (ipranges("3.224.62.45/32"), ipranges("18.97.21.0/30"))
+    try:
+        flags = {name: safe for name, safe, _ in perplexity.build()}
+    finally:
+        perplexity.fetch = saved
+    assert flags[perplexity.CRAWLER_NAME] is True
+    assert flags[perplexity.USER_NAME] is False
+
+
+def test_anthropic_is_opt_in():
+    got = {str(n) for n in anthropic.transform(ipranges("216.73.216.0/22",
+                                                        "34.162.230.222/32"))}
+    assert got == {"216.73.216.0/22", "34.162.230.222/32"}
+    # one undifferentiated file: ClaudeBot + Claude-User share it, so opt-in
+    assert anthropic.SAFE is False
+
+
+def test_bingbot_and_duckduckbot_transform():
+    assert {str(n) for n in bingbot.transform(ipranges("157.55.39.0/24"))} == \
+        {"157.55.39.0/24"}
+    assert bingbot.SAFE is True
+    assert {str(n) for n in duckduckgo.transform(ipranges("104.43.54.127/32"))} == \
+        {"104.43.54.127/32"}
+    assert duckduckgo.SAFE is True
+
+
+def test_google_crawlers_merges_both_feeds():
+    got = {str(n) for n in google_crawlers.transform(
+        ipranges("66.249.64.0/27"),                 # common-crawlers
+        ipranges("2001:4860:4801:2008::/64"),       # special-crawlers
+    )}
+    assert got == {"66.249.64.0/27", "2001:4860:4801:2008::/64"}
+    assert google_crawlers.SAFE is True
+
+
+# --------------------------------------------------------------------------
+# stripe / okta / datadog / atlassian / bunny
+# --------------------------------------------------------------------------
+
+def test_stripe_reads_bare_ips_from_both_files():
+    api = {"API": ["13.112.224.240", "not-an-ip", None]}
+    hooks = {"WEBHOOKS": ["3.18.12.63"], "unexpected_key": "ignored"}
+    got = {str(n) for n in stripe.transform(api, hooks)}
+    assert got == {"13.112.224.240/32", "3.18.12.63/32"}
+
+
+def test_okta_walks_every_cell():
+    payload = {
+        "us_cell_1": {"ip_ranges": ["8.28.124.0/24", "junk"]},
+        "emea_cell_2": {"ip_ranges": ["2600:1f18::/47"]},
+        "broken_cell": {"ip_ranges": None},
+        "not_a_cell": "string",
+    }
+    got = {str(n) for n in okta.transform(payload)}
+    assert got == {"8.28.124.0/24", "2600:1f18::/47"}
+
+
+def test_datadog_excludes_customer_run_private_locations():
+    payload = {
+        "version": 63,
+        "modified": "2026-08-12T00:00:00",
+        "webhooks": {"prefixes_ipv4": ["3.233.144.0/20"], "prefixes_ipv6": []},
+        "synthetics": {"prefixes_ipv4": ["3.211.130.0/24"],
+                       "prefixes_ipv6": ["2600:1f18:24e6:b900::/56"]},
+        "synthetics-private-locations": {"prefixes_ipv4": ["10.9.9.0/24"]},
+    }
+    got = {str(n) for n in datadog.transform(payload)}
+    assert got == {"3.233.144.0/20", "3.211.130.0/24", "2600:1f18:24e6:b900::/56"}
+    assert "10.9.9.0/24" not in got          # runs in the customer's own network
+    assert datadog.SAFE is True
+
+
+def test_atlassian_reads_items_and_is_opt_in():
+    payload = {"items": [
+        {"cidr": "52.82.172.0/22", "product": ["email"], "direction": ["egress"]},
+        {"cidr": "2401:1d80::/32", "product": ["jira", "forge"], "direction": ["egress"]},
+        {"network": "1.2.3.4"},              # no cidr key -> skipped
+        "not-a-dict",
+    ]}
+    got = {str(n) for n in atlassian.transform(payload)}
+    assert got == {"52.82.172.0/22", "2401:1d80::/32"}
+    # shared with Forge apps and Pipelines -> never in all-safe.txt
+    assert atlassian.SAFE is False
+
+
+def test_bunny_reads_flat_array_and_is_opt_in():
+    got = {str(n) for n in bunny.transform(["89.187.188.227", "junk", 42])}
+    assert got == {"89.187.188.227/32"}
+    assert bunny.transform({"unexpected": "shape"}) == []
+    assert bunny.SAFE is False
 
 
 # --------------------------------------------------------------------------

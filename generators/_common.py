@@ -11,6 +11,7 @@ unit-tested against synthetic payloads.
 import ipaddress
 import json
 import os
+import socket
 import sys
 import time
 import urllib.error
@@ -71,6 +72,44 @@ def fetch_json(url, **kwargs):
     return json.loads(fetch_bytes(url, **kwargs).decode("utf-8"))
 
 
+def whois_query(query, host="whois.radb.net", port=43, retries=3, backoff=2.0,
+                timeout=30):
+    """Run one whois (RFC 3912, TCP/43) query and return the full response text.
+
+    Used for providers whose officially documented source is an IRR query rather
+    than an HTTPS feed (Meta). Same failure policy as fetch_bytes: retry with
+    exponential backoff, then raise -- never return a truncated body silently.
+    """
+    last_err = None
+    for attempt in range(1, retries + 1):
+        try:
+            chunks = []
+            with socket.create_connection((host, port), timeout=timeout) as sock:
+                sock.sendall((query + "\r\n").encode("utf-8"))
+                while True:
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+            data = b"".join(chunks)
+            if not data:
+                raise RuntimeError("empty whois response")
+            return data.decode("utf-8", "replace")
+        except (OSError, RuntimeError) as err:
+            last_err = err
+            if attempt < retries:
+                sleep_for = backoff ** attempt
+                sys.stderr.write(
+                    f"[warn] whois {host} '{query}' failed (attempt {attempt}/"
+                    f"{retries}): {err}; retrying in {sleep_for:.1f}s\n"
+                )
+                time.sleep(sleep_for)
+
+    raise RuntimeError(
+        f"failed whois {host} '{query}' after {retries} attempts: {last_err}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Parsing (pure)
 # ---------------------------------------------------------------------------
@@ -95,6 +134,27 @@ def to_networks(strings):
         except ValueError:
             # not an IP network -- skip quietly, this is expected for mixed feeds
             continue
+    return out
+
+
+def extract_prefix_entries(payload, keys=("ipv4Prefix", "ipv6Prefix")):
+    """Pull prefix strings out of Google's ipranges JSON shape:
+
+        {"creationTime": ..., "prefixes": [{"ipv4Prefix": "8.8.8.0/24"}, ...]}
+
+    Google published this shape first (goog.json, the crawler feeds) and OpenAI,
+    Anthropic, Perplexity, Bing, DuckDuckGo and Apple all copied it verbatim, so
+    one helper serves them all. Non-dict entries and unknown keys are skipped.
+    """
+    out = []
+    for entry in payload.get("prefixes", []):
+        if not isinstance(entry, dict):
+            continue
+        for key in keys:
+            value = entry.get(key)
+            if isinstance(value, str):
+                out.append(value)
+                break
     return out
 
 

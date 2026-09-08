@@ -16,26 +16,55 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as common  # noqa: E402
 
+import anthropic
 import apple
+import atlassian
 import aws
+import bingbot
+import bunny
 import cloudflare
+import datadog
+import duckduckgo
 import fastly
 import github
 import google
+import google_crawlers
+import meta
 import microsoft365
+import okta
+import openai
+import perplexity
+import stripe
+import telegram
 import zoom
 import zscaler
 
 # Order is cosmetic (each writes its own file); aggregate is sorted anyway.
 GENERATORS = [
+    # provider services
     github,
     google,
     microsoft365,
     apple,
+    meta,
+    telegram,
     zoom,
+    okta,
+    stripe,
+    datadog,
+    atlassian,
     aws,
+    # crawlers / AI fetchers
+    google_crawlers,
+    bingbot,
+    duckduckgo,
+    openai,
+    anthropic,
+    perplexity,
+    # shared CDN / proxy edges
     cloudflare,
     fastly,
+    bunny,
     zscaler,
 ]
 
