@@ -24,16 +24,7 @@ CLOUD_URL = "https://www.gstatic.com/ipranges/cloud.json"
 
 def extract_prefixes(payload):
     """Pull ipv4Prefix / ipv6Prefix strings out of a gstatic ipranges payload."""
-    out = []
-    for entry in payload.get("prefixes", []):
-        if not isinstance(entry, dict):
-            continue
-        value = entry.get("ipv4Prefix")
-        if not isinstance(value, str):
-            value = entry.get("ipv6Prefix")
-        if isinstance(value, str):
-            out.append(value)
-    return out
+    return common.extract_prefix_entries(payload)
 
 
 def transform(goog_payload, cloud_payload):
